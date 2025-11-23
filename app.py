@@ -190,7 +190,7 @@ def format_product_list(products, title):
     
     text = f"📦 {title}\n\n"
     
-    for i, product in enumerate(list(products)[:5], 1):
+    for i, product in enumerate(products[:5], 1):
         name = product.get('name', 'N/A')
         price = product.get('price', '0')
         stock = product.get('stock_status', 'outofstock')
