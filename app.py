@@ -151,8 +151,13 @@ def search_products(query):
             "search": query,
             "per_page": 5
         })
-        return response.json()
-    except Exception as e:
+                result = response.json()
+                logger.info(f"Search query: {query}")
+                logger.info(f"API status: {response.status_code}")
+                logger.info(f"Result type: {type(result)}")
+                logger.info(f"Result length: {len(result) if isinstance(result, list) else 'N/A'}")
+                logger.info(f"Result: {result}")
+        return result    except Exception as e:
         logger.error(f"Search error: {e}")
         return []
 
