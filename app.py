@@ -52,7 +52,7 @@ STORES = {
         'parking': '10 θέσεις parking',
         'lat': '38.0217',
         'lng': '23.8003',
-        'google_maps': 'https://www.google.com/maps/dir/?api=1&destination=38.0217,23.8003&travelmode=driving',
+        'google_maps': 'https://maps.app.goo.gl/H8ofyNhr1vuEUJeF7',
         'waze': 'https://waze.com/ul?ll=38.0217,23.8003&navigate=yes',
         'drive_through': True,
         'active': True
@@ -205,6 +205,12 @@ NO_DISCOUNT_CATEGORIES = [
 B2B_TAG_SLUG = 'b2b'  # WooCommerce tag slug
 B2B_DISCOUNT = 0.20   # 20% discount
 
+# ============================================
+# 🔄 SUBSCRIPTION TAG CONFIGURATION
+# ============================================
+SUBSCRIBE_TAG_SLUG = 'subscribe'  # WooCommerce tag slug
+SUBSCRIPTION_DISCOUNT = 0.10  # 10% discount
+
 def is_b2b_product(product):
     """Check if product has b2b tag"""
     tags = product.get('tags', [])
@@ -250,6 +256,41 @@ def get_b2b_products():
     except Exception as e:
         logger.error(f"Error fetching B2B products: {e}")
         return []
+
+def get_subscription_products():
+    """Get all products with subscribe tag from WooCommerce"""
+    try:
+        # First get the subscribe tag ID
+        tags_response = wcapi.get("products/tags", params={"slug": SUBSCRIBE_TAG_SLUG})
+        tags = tags_response.json()
+        
+        if not tags or not isinstance(tags, list):
+            logger.warning("Subscribe tag not found in WooCommerce")
+            return []
+        
+        tag_id = tags[0].get('id')
+        if not tag_id:
+            return []
+        
+        # Get products with this tag
+        response = wcapi.get("products", params={"tag": tag_id, "per_page": 50})
+        products = response.json()
+        
+        # Filter out no-discount products
+        products = [p for p in products if not is_discount_excluded(p)] if isinstance(products, list) else []
+        
+        return products
+    except Exception as e:
+        logger.error(f"Error fetching subscription products: {e}")
+        return []
+
+def is_subscription_product(product):
+    """Check if product has subscribe tag"""
+    tags = product.get('tags', [])
+    for tag in tags:
+        if tag.get('slug', '').lower() == SUBSCRIBE_TAG_SLUG:
+            return True
+    return False
 
 def is_discount_excluded(product):
     """Check if product is excluded from discounts"""
@@ -436,6 +477,7 @@ def route_message(msg, customer, session):
         'store_selection': handle_store_selection,
         'wholesale': handle_wholesale,
         'wholesale_inquiry': handle_wholesale_inquiry,
+        'wholesale_phone': handle_wholesale_phone,
     }
     
     handler = handlers.get(state, handle_welcome)
@@ -660,9 +702,9 @@ def handle_wholesale(msg, customer, session):
 
 ━━━━━━━━━━━━━━━━━━━━
 
-Θέλετε να σας καλέσουμε;
+Θέλετε να επικοινωνήσουμε μαζί σας;
 
-1️⃣ Ναι, στείλτε τηλέφωνο
+1️⃣ Ναι, στείλτε τηλέφωνο/email
 2️⃣ Όχι, θα επικοινωνήσω
 3️⃣ 📦 Δες προϊόντα B2B
 
@@ -678,7 +720,9 @@ def handle_wholesale_inquiry(msg, customer, session):
     
     if msg == '1':
         session['state'] = 'wholesale_phone'
-        return "📞 Στείλτε το τηλέφωνό σας:"
+        return """📞 Στείλτε τηλέφωνο ή email:
+
+(σταθερό, κινητό ή email)"""
     
     elif msg == '2':
         session['state'] = 'menu'
@@ -719,6 +763,61 @@ def handle_wholesale_inquiry(msg, customer, session):
     
     return "Επίλεξε 1, 2 ή 3 (ή στείλε τηλέφωνο)"
 
+def handle_wholesale_phone(msg, customer, session):
+    """Handle B2B phone/email capture"""
+    if msg.lower() == 'menu':
+        session['state'] = 'menu'
+        return get_main_menu(customer)
+    
+    # Clean input
+    contact = msg.strip()
+    biz = session.get('business_info', {})
+    business_name = biz.get('name', 'Επαγγελματίας')
+    
+    # Check if it's an email
+    is_email = '@' in contact and '.' in contact
+    
+    # Check if it's a phone (mobile or landline, 10+ digits)
+    phone_clean = contact.replace(' ', '').replace('-', '').replace('+', '')
+    is_phone = len(phone_clean) >= 10 and phone_clean.isdigit()
+    
+    if is_email or is_phone:
+        contact_type = "Email" if is_email else "Τηλέφωνο"
+        
+        # LOG THE B2B LEAD
+        logger.info(f"🏭 B2B LEAD: {business_name} - {contact} - {customer['phone']}")
+        
+        # Save to customer profile
+        customer['b2b_contact'] = contact
+        customer['is_business'] = True
+        
+        session['state'] = 'menu'
+        return f"""✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!
+
+Θα επικοινωνήσουμε σύντομα:
+📞 {contact}
+
+Τύπος: {business_name}
+
+━━━━━━━━━━━━━━━━━━━━
+
+Ευχαριστούμε για το ενδιαφέρον!
+Η ομάδα μας θα επικοινωνήσει
+μαζί σας εντός 24 ωρών.
+
+Γράψε 'menu' για αρχικό μενού"""
+    
+    return f"""❌ Μη έγκυρο στοιχείο επικοινωνίας.
+
+Παρακαλώ στείλτε:
+📞 Τηλέφωνο (σταθερό ή κινητό)
+📧 Ή email
+
+Π.χ. 6912345678, 2101234567
+     info@company.gr
+
+(ή 'menu' για έξοδο)"""
+
 # ============================================
 # MAIN MENU
 # ============================================
@@ -743,7 +842,7 @@ def get_main_menu(customer):
 4️⃣ 📦 Κατηγορίες
 5️⃣ 🔄 Συνδρομή -10%
 6️⃣ 👤 Λογαριασμός
-7️⃣ 📍 Οδηγίες
+7️⃣ 📍 Τοποθεσία Google Maps
 8️⃣ 📞 Εξυπηρέτηση
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -1031,6 +1130,37 @@ def format_b2b_product_list(products, title):
     
     return text
 
+def format_subscription_product_list(products, title):
+    """Format subscription product list with 10% discount"""
+    if not products:
+        return "Δεν βρέθηκαν προϊόντα συνδρομής 😔"
+    
+    text = f"🔄 {title}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"💰 Έκπτωση: -10% ΠΑΝΤΑ\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, product in enumerate(products[:15], 1):
+        name = product.get('name', 'N/A')
+        try:
+            retail_price = float(product.get('price', '0'))
+            sub_price = round(retail_price * 0.90, 2)
+        except:
+            retail_price = 0
+            sub_price = 0
+        
+        stock = product.get('stock_status', 'outofstock')
+        stock_emoji = "✅" if stock == "instock" else "❌"
+        
+        text += f"{i}. {name}\n"
+        text += f"   🔄 Συνδρομή: {sub_price}€ (Λιαν: {retail_price}€) {stock_emoji}\n\n"
+    
+    text += "━━━━━━━━━━━━━━━━━━━━\n"
+    text += "Αριθμό για επιλογή προϊόντος\n"
+    text += "('menu')"
+    
+    return text
+
 def format_product_list(products, title, page=1, check_promo=False, no_discount_category=False):
     """Format product list"""
     if not products:
@@ -1195,8 +1325,9 @@ def get_subscription_intro(customer):
 • Βρεφικό γάλα (Humana, NAN)
 • Solgar
 
-1️⃣ Θέλω συνδρομή!
-2️⃣ Περισσότερα
+1️⃣ 📦 Δες προϊόντα συνδρομής
+2️⃣ 🔍 Αναζήτηση προϊόντος
+3️⃣ ℹ️ Περισσότερες πληροφορίες
 
 ('menu')"""
 
@@ -1207,6 +1338,16 @@ def handle_subscription(msg, customer, session):
         return get_main_menu(customer)
 
     if msg == '1':
+        # Get products with subscribe tag
+        products = get_subscription_products()
+        if products:
+            session['products'] = products
+            session['state'] = 'product_list'
+            session['after_product'] = 'subscription_frequency'
+            return format_subscription_product_list(products, "ΠΡΟΪΟΝΤΑ ΣΥΝΔΡΟΜΗΣ")
+        return "Δεν βρέθηκαν προϊόντα συνδρομής.\n\nΓράψε '2' για αναζήτηση ή 'menu'"
+    
+    elif msg == '2':
         session['state'] = 'subscription_product'
         return """📦 ΚΑΤΗΓΟΡΙΑ
 
@@ -1218,10 +1359,20 @@ def handle_subscription(msg, customer, session):
 
 Επίλεξε 1-5"""
 
-    elif msg == '2':
-        return "📋 Επιλέγεις προϊόν → συχνότητα → ημέρα → -10%!\n\nΓράψε '1'"
+    elif msg == '3':
+        return """📋 ΠΩΣ ΛΕΙΤΟΥΡΓΕΙ
 
-    return "Επίλεξε 1-2"
+1️⃣ Επιλέγεις προϊόν
+2️⃣ Επιλέγεις συχνότητα
+3️⃣ Επιλέγεις ημέρα παραλαβής
+4️⃣ Παίρνεις -10% ΠΑΝΤΑ!
+
+✅ Υπενθύμιση 1 μέρα πριν
+✅ Αλλαγή/ακύρωση ελεύθερα
+
+Γράψε '1' για να ξεκινήσεις!"""
+
+    return get_subscription_intro(customer)
 
 def handle_subscription_product(msg, customer, session):
     """Handle subscription product"""
