@@ -159,21 +159,24 @@ FRANCHISE_INFO = {
 WHOLESALE_INFO = {
     'website': 'https://easycaremarket.gr',
     'b2b_portal': 'https://b2b.easycaremarket.gr',
+    'discount': '20%',
+    'min_order_free_shipping': 350,  # Minimum order for free shipping
+    'shipping_cost': 15,  # Shipping cost if below minimum
     'target_customers': [
-        {'type': 'daycare', 'name': '🏫 Παιδικοί Σταθμοί', 'discount': '15-25%'},
-        {'type': 'nursing_home', 'name': '🏥 Γηροκομεία', 'discount': '20-30%'},
-        {'type': 'church', 'name': '⛪ Εκκλησιαστικά Ιδρύματα', 'discount': '15-25%'},
-        {'type': 'elderly_care', 'name': '👴 Κέντρα Φροντίδας Ηλικιωμένων', 'discount': '20-30%'},
-        {'type': 'kapi', 'name': '🏛️ ΚΑΠΗ', 'discount': '15-25%'},
-        {'type': 'hotel', 'name': '🏨 Ξενοδοχεία', 'discount': '15-20%'},
-        {'type': 'other', 'name': '🏢 Άλλες Επιχειρήσεις', 'discount': 'Κατόπιν συνεννόησης'}
+        {'type': 'daycare', 'name': '🏫 Παιδικός Σταθμός'},
+        {'type': 'nursing_home', 'name': '🏥 Γηροκομείο'},
+        {'type': 'church', 'name': '⛪ Εκκλησιαστικό Ίδρυμα'},
+        {'type': 'elderly_care', 'name': '👴 Κέντρο Φροντίδας Ηλικιωμένων'},
+        {'type': 'kapi', 'name': '🏛️ ΚΑΠΗ'},
+        {'type': 'hotel', 'name': '🏨 Ξενοδοχείο'},
+        {'type': 'other', 'name': '🏢 Άλλη Επιχείρηση'}
     ],
     'benefits': [
-        'Τιμές χονδρικής',
+        'Έκπτωση -20%',
         'Τιμολόγιο',
         'Παράδοση στις αποθήκες σας',
-        'Πίστωση',
-        'Εξειδικευμένη εξυπηρέτηση'
+        'ΔΩΡΕΑΝ μεταφορικά (παραγγελίες 350€+)',
+        'Πίστωση'
     ],
     'contact_phone': '210 680 0549'
 }
@@ -195,6 +198,58 @@ NO_DISCOUNT_CATEGORIES = [
     'βρεφικό γάλα', 'βρεφικο γαλα', 'baby formula',
     'βρεφική διατροφή', 'solgar'
 ]
+
+# ============================================
+# 🏭 B2B TAG CONFIGURATION
+# ============================================
+B2B_TAG_SLUG = 'b2b'  # WooCommerce tag slug
+B2B_DISCOUNT = 0.20   # 20% discount
+
+def is_b2b_product(product):
+    """Check if product has b2b tag"""
+    tags = product.get('tags', [])
+    for tag in tags:
+        if tag.get('slug', '').lower() == B2B_TAG_SLUG:
+            return True
+    return False
+
+def get_b2b_price(product):
+    """Calculate B2B price (20% discount)"""
+    try:
+        price = float(product.get('price', 0))
+        if price <= 0:
+            return None
+        
+        # Apply 20% B2B discount
+        b2b_price = price * (1 - B2B_DISCOUNT)
+        
+        return round(b2b_price, 2)
+    except:
+        return None
+
+def get_b2b_products():
+    """Get all products with b2b tag from WooCommerce"""
+    try:
+        # First get the b2b tag ID
+        tags_response = wcapi.get("products/tags", params={"slug": B2B_TAG_SLUG})
+        tags = tags_response.json()
+        
+        if not tags or not isinstance(tags, list):
+            logger.warning("B2B tag not found in WooCommerce")
+            return []
+        
+        tag_id = tags[0].get('id')
+        if not tag_id:
+            return []
+        
+        # Get products with this tag
+        response = wcapi.get("products", params={"tag": tag_id, "per_page": 50})
+        products = response.json()
+        
+        return products if isinstance(products, list) else []
+    except Exception as e:
+        logger.error(f"Error fetching B2B products: {e}")
+        return []
 
 def is_discount_excluded(product):
     """Check if product is excluded from discounts"""
@@ -528,16 +583,23 @@ def get_wholesale_menu():
 
 ━━━━━━━━━━━━━━━━━━━━
 
-✅ ΠΛΕΟΝΕΚΤΗΜΑΤΑ:
-• Τιμές χονδρικής (-15% έως -30%)
+💰 ΠΛΕΟΝΕΚΤΗΜΑΤΑ:
+• Έκπτωση -20%
 • Τιμολόγιο
-• Παράδοση στις αποθήκες σας
-• Πίστωση
+• Παράδοση στην αποθήκη σας
+
+🚚 ΜΕΤΑΦΟΡΙΚΑ:
+• ΔΩΡΕΑΝ για παραγγελίες 350€+
+• 15€ για μικρότερες παραγγελίες
+
+━━━━━━━━━━━━━━━━━━━━
+
+7️⃣ 📦 ΔΕΣ ΠΡΟΪΟΝΤΑ B2B
 
 🌐 {WHOLESALE_INFO['website']}
 🏢 {WHOLESALE_INFO['b2b_portal']}
 
-Επίλεξε 1-6 (ή 'menu')"""
+Επίλεξε 1-7 (ή 'menu')"""
 
 def handle_wholesale(msg, customer, session):
     """Handle wholesale menu"""
@@ -545,13 +607,24 @@ def handle_wholesale(msg, customer, session):
         session['state'] = 'menu'
         return get_main_menu(customer)
     
+    # Option 7: View B2B products
+    if msg == '7':
+        # Mark customer as business to see B2B prices
+        customer['is_business'] = True
+        products = get_b2b_products()
+        if products:
+            session['state'] = 'product_list'
+            session['products'] = products
+            return format_b2b_product_list(products, "🏭 ΠΡΟΪΟΝΤΑ B2B")
+        return "Δεν βρέθηκαν B2B προϊόντα.\n\n(Πληκτρολόγησε 'menu')"
+    
     business_types = {
-        '1': {'type': 'daycare', 'name': 'Παιδικός Σταθμός', 'discount': '15-25%'},
-        '2': {'type': 'nursing_home', 'name': 'Γηροκομείο', 'discount': '20-30%'},
-        '3': {'type': 'church', 'name': 'Εκκλησιαστικό Ίδρυμα', 'discount': '15-25%'},
-        '4': {'type': 'elderly_care', 'name': 'Κέντρο Φροντίδας', 'discount': '20-30%'},
-        '5': {'type': 'kapi', 'name': 'ΚΑΠΗ', 'discount': '15-25%'},
-        '6': {'type': 'other', 'name': 'Ξενοδοχείο/Άλλο', 'discount': 'Κατόπιν συνεννόησης'}
+        '1': {'type': 'daycare', 'name': 'Παιδικός Σταθμός'},
+        '2': {'type': 'nursing_home', 'name': 'Γηροκομείο'},
+        '3': {'type': 'church', 'name': 'Εκκλησιαστικό Ίδρυμα'},
+        '4': {'type': 'elderly_care', 'name': 'Κέντρο Φροντίδας'},
+        '5': {'type': 'kapi', 'name': 'ΚΑΠΗ'},
+        '6': {'type': 'other', 'name': 'Ξενοδοχείο/Άλλο'}
     }
     
     if msg in business_types:
@@ -564,12 +637,19 @@ def handle_wholesale(msg, customer, session):
         
         return f"""✅ {biz['name']}
 
-📊 ΕΚΠΤΩΣΗ: {biz['discount']}
+━━━━━━━━━━━━━━━━━━━━
+💰 ΤΙΜΕΣ ΧΟΝΔΡΙΚΗΣ
+━━━━━━━━━━━━━━━━━━━━
 
-Για να λάβετε προσφορά:
+📊 Έκπτωση: -20%
+📄 Τιμολόγιο: ΝΑΙ
 
-1️⃣ Στείλτε email με τα στοιχεία σας
-2️⃣ Ή καλέστε μας
+━━━━━━━━━━━━━━━━━━━━
+🚚 ΠΑΡΑΔΟΣΗ ΣΤΗΝ ΑΠΟΘΗΚΗ ΣΑΣ
+━━━━━━━━━━━━━━━━━━━━
+
+✅ ΔΩΡΕΑΝ για παραγγελίες 350€+
+💵 15€ για μικρότερες παραγγελίες
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -584,6 +664,7 @@ def handle_wholesale(msg, customer, session):
 
 1️⃣ Ναι, στείλτε τηλέφωνο
 2️⃣ Όχι, θα επικοινωνήσω
+3️⃣ 📦 Δες προϊόντα B2B
 
 (ή 'menu')"""
     
@@ -611,6 +692,15 @@ def handle_wholesale_inquiry(msg, customer, session):
 
 Γράψε 'menu'"""
     
+    elif msg == '3':
+        # Show B2B products
+        products = get_b2b_products()
+        if products:
+            session['state'] = 'product_list'
+            session['products'] = products
+            return format_b2b_product_list(products, "ΠΡΟΪΟΝΤΑ B2B")
+        return "Δεν βρέθηκαν B2B προϊόντα.\n\n(Γράψε 'menu')"
+    
     # Assume it's a phone number
     if len(msg) >= 10:
         biz = session.get('business_info', {})
@@ -627,7 +717,7 @@ def handle_wholesale_inquiry(msg, customer, session):
 
 Γράψε 'menu'"""
     
-    return "Επίλεξε 1 ή 2 (ή στείλε τηλέφωνο)"
+    return "Επίλεξε 1, 2 ή 3 (ή στείλε τηλέφωνο)"
 
 # ============================================
 # MAIN MENU
@@ -911,6 +1001,36 @@ def handle_product_selection(msg, customer, session):
 # ============================================
 # PRODUCT FORMATTING
 # ============================================
+def format_b2b_product_list(products, title):
+    """Format B2B product list with 20% discount"""
+    if not products:
+        return "Δεν βρέθηκαν B2B προϊόντα 😔"
+    
+    text = f"🏭 {title}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"💰 Έκπτωση: -20%\n"
+    text += f"🚚 ΔΩΡΕΑΝ μεταφορικά 350€+\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, product in enumerate(products[:15], 1):
+        name = product.get('name', 'N/A')
+        retail_price = product.get('price', '0')
+        stock = product.get('stock_status', 'outofstock')
+        stock_emoji = "✅" if stock == "instock" else "❌"
+        
+        # Calculate B2B price (20% off)
+        b2b_price = get_b2b_price(product)
+        b2b_str = f"{b2b_price}€" if b2b_price else "N/A"
+        
+        text += f"{i}. {name}\n"
+        text += f"   💶 B2B: {b2b_str} (Λιανική: {retail_price}€) {stock_emoji}\n\n"
+    
+    text += "━━━━━━━━━━━━━━━━━━━━\n"
+    text += "Αριθμό για λεπτομέρειες\n"
+    text += "('menu' | 'wholesale')"
+    
+    return text
+
 def format_product_list(products, title, page=1, check_promo=False, no_discount_category=False):
     """Format product list"""
     if not products:
@@ -975,10 +1095,21 @@ def format_product_details(product, customer=None):
     
     excluded = is_discount_excluded(product)
     store = get_customer_store(customer) if customer else STORES[DEFAULT_STORE]
+    is_b2b = is_b2b_product(product)
+    is_business_customer = customer and customer.get('is_business', False)
 
     text = f"📦 {name}\n\n"
-    text += f"💰 {price}€\n"
-    text += f"📊 {'Διαθέσιμο ✅' if stock == 'instock' else 'Εξαντλήθηκε ❌'}\n"
+    text += f"💰 Λιανική: {price}€\n"
+    
+    # Show B2B price if product has b2b tag AND customer is business
+    if is_b2b and is_business_customer:
+        b2b_price = get_b2b_price(product)
+        if b2b_price:
+            text += f"\n🏭 ΤΙΜΗ B2B: {b2b_price}€ (-20%)\n"
+    elif is_b2b:
+        text += f"\n🏭 Διαθέσιμο για B2B\n"
+    
+    text += f"\n📊 {'Διαθέσιμο ✅' if stock == 'instock' else 'Εξαντλήθηκε ❌'}\n"
 
     if excluded:
         text += "\n⚠️ Σταθερή τιμή - χωρίς εκπτώσεις.\n"
