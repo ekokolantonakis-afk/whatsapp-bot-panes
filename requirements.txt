@@ -2,3 +2,4 @@ flask==3.0.0
 twilio==8.11.0
 gunicorn==21.2.0
 WooCommerce==3.0.0
+anthropic>=0.18.0
