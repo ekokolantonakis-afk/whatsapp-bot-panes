@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 # 📧 EMAIL CONFIGURATION
 # ============================================
 EMAIL_CONFIG = {
-    'smtp_server': getattr(config, 'SMTP_SERVER', 'smtp.gmail.com'),
-    'smtp_port': getattr(config, 'SMTP_PORT', 587),
-    'smtp_user': getattr(config, 'SMTP_USER', ''),
-    'smtp_password': getattr(config, 'SMTP_PASSWORD', ''),
-    'from_email': getattr(config, 'FROM_EMAIL', 'noreply@panes.gr'),
+    'smtp_server': os.environ.get('SMTP_SERVER', getattr(config, 'SMTP_SERVER', 'smtp.gmail.com')),
+    'smtp_port': int(os.environ.get('SMTP_PORT', getattr(config, 'SMTP_PORT', 587))),
+    'smtp_user': os.environ.get('SMTP_USER', getattr(config, 'SMTP_USER', '')),
+    'smtp_password': os.environ.get('SMTP_PASSWORD', getattr(config, 'SMTP_PASSWORD', '')),
+    'from_email': os.environ.get('FROM_EMAIL', getattr(config, 'FROM_EMAIL', 'noreply@panes.gr')),
     'store_emails': {
         'chalandri': 'halandri@panes.gr',
         'support': 'support@panes.gr'
@@ -81,11 +81,17 @@ wcapi = API(
 claude_client = None
 try:
     from anthropic import Anthropic
-    if hasattr(config, 'ANTHROPIC_API_KEY') and config.ANTHROPIC_API_KEY:
-        claude_client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    # Check both config and environment variable
+    api_key = getattr(config, 'ANTHROPIC_API_KEY', None) or os.environ.get('ANTHROPIC_API_KEY')
+    if api_key:
+        claude_client = Anthropic(api_key=api_key)
         logger.info("✅ Claude AI initialized successfully!")
+    else:
+        logger.warning("⚠️ ANTHROPIC_API_KEY not found - AI features disabled")
+except ImportError:
+    logger.warning("⚠️ anthropic package not installed")
 except Exception as e:
-    logger.warning(f"⚠️ Claude AI not available: {e}")
+    logger.warning(f"⚠️ Claude AI error: {e}")
 
 # ============================================
 # 🏪 ALL CARESTORES LOCATIONS
@@ -447,29 +453,49 @@ CATEGORIES = {
 @app.route("/webhook", methods=['POST'])
 def webhook():
     """Handle incoming WhatsApp messages"""
-    incoming_msg = request.values.get('Body', '').strip()
-    from_number = request.values.get('From', '')
+    try:
+        incoming_msg = request.values.get('Body', '').strip()
+        from_number = request.values.get('From', '')
 
-    logger.info(f"📱 Received from {from_number}: {incoming_msg}")
+        logger.info(f"📱 Received from {from_number}: {incoming_msg}")
 
-    resp = MessagingResponse()
-    msg = resp.message()
+        resp = MessagingResponse()
+        msg = resp.message()
 
-    customer = get_or_create_customer(from_number)
+        customer = get_or_create_customer(from_number)
+        
+        if from_number not in sessions:
+            sessions[from_number] = {'state': 'welcome'}
+        session = sessions[from_number]
+        
+        logger.info(f"📊 Session state: {session.get('state', 'unknown')}")
+
+        try:
+            if session.get('ai_mode') and claude_client:
+                response_text = handle_ai_conversation(incoming_msg, customer, session)
+            else:
+                response_text = route_message(incoming_msg, customer, session)
+        except Exception as handler_error:
+            logger.error(f"❌ Handler error: {handler_error}", exc_info=True)
+            response_text = "Σφάλμα. Γράψε 'menu' για αρχικό μενού."
+            session['state'] = 'menu'
+
+        customer['last_interaction'] = datetime.now().isoformat()
+        
+        # Ensure response is not empty
+        if not response_text or len(response_text.strip()) == 0:
+            response_text = "Γράψε 'menu' για αρχικό μενού."
+            logger.warning("⚠️ Empty response detected, sending fallback")
+        
+        msg.body(response_text)
+        logger.info(f"📤 Sending ({len(response_text)} chars): {response_text[:80]}...")
+        return str(resp)
     
-    if from_number not in sessions:
-        sessions[from_number] = {'state': 'welcome'}
-    session = sessions[from_number]
-
-    if session.get('ai_mode') and claude_client:
-        response_text = handle_ai_conversation(incoming_msg, customer, session)
-    else:
-        response_text = route_message(incoming_msg, customer, session)
-
-    customer['last_interaction'] = datetime.now().isoformat()
-    
-    msg.body(response_text)
-    return str(resp)
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        resp = MessagingResponse()
+        resp.message("Σφάλμα. Γράψε 'menu'.")
+        return str(resp)
 
 def route_message(msg, customer, session):
     """Route message to appropriate handler"""
@@ -503,8 +529,8 @@ def route_message(msg, customer, session):
         if claude_client:
             session['ai_mode'] = True
             session['ai_history'] = []
-            return "🤖 AI Βοηθός!\n\nΡώτα με οτιδήποτε!\n\n(Γράψε 'menu')"
-        return "AI δεν είναι διαθέσιμο."
+            return "🤖 AI Βοηθός ενεργοποιήθηκε!\n\nΡώτα με οτιδήποτε για πάνες, προϊόντα, τιμές!\n\n(Γράψε 'menu' για έξοδο)"
+        return "⚠️ Το AI δεν είναι διαθέσιμο αυτή τη στιγμή.\n\nΠαρακαλώ δοκιμάστε αργότερα ή γράψτε 'menu' για το μενού."
 
     handlers = {
         'welcome': handle_welcome,
@@ -877,7 +903,26 @@ def handle_wholesale_inquiry(msg, customer, session):
     # Assume it's a phone number
     if len(msg) >= 10:
         biz = session.get('business_info', {})
-        logger.info(f"B2B LEAD: {biz.get('name')} - {msg} - {customer['phone']}")
+        customer_phone = customer.get('phone', 'N/A')
+        
+        logger.info(f"🏭 B2B LEAD: {biz.get('name')} - {msg} - {customer_phone}")
+        
+        # Send email notification
+        email_subject = f"🏭 Νέο B2B Lead - {biz.get('name', 'Επαγγελματίας')}"
+        email_html = f"""
+        <h2>🏭 Νέο Ενδιαφέρον B2B/Χονδρική</h2>
+        <hr>
+        <p><strong>Τύπος Επιχείρησης:</strong> {biz.get('name', 'Επαγγελματίας')}</p>
+        <p><strong>Τηλέφωνο Επικοινωνίας:</strong> {msg}</p>
+        <p><strong>WhatsApp:</strong> {customer_phone}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        <p>📞 Επικοινωνήστε εντός 24 ωρών.</p>
+        <p>🌐 B2B Portal: {WHOLESALE_INFO['b2b_portal']}</p>
+        """
+        
+        send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
         session['state'] = 'menu'
         return f"""✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!
 
@@ -912,13 +957,30 @@ def handle_wholesale_phone(msg, customer, session):
     
     if is_email or is_phone:
         contact_type = "Email" if is_email else "Τηλέφωνο"
+        customer_phone = customer.get('phone', 'N/A')
         
         # LOG THE B2B LEAD
-        logger.info(f"🏭 B2B LEAD: {business_name} - {contact} - {customer['phone']}")
+        logger.info(f"🏭 B2B LEAD: {business_name} - {contact} - {customer_phone}")
         
         # Save to customer profile
         customer['b2b_contact'] = contact
         customer['is_business'] = True
+        
+        # Send email notification
+        email_subject = f"🏭 Νέο B2B Lead - {business_name}"
+        email_html = f"""
+        <h2>🏭 Νέο Ενδιαφέρον B2B/Χονδρική</h2>
+        <hr>
+        <p><strong>Τύπος Επιχείρησης:</strong> {business_name}</p>
+        <p><strong>{contact_type} Επικοινωνίας:</strong> {contact}</p>
+        <p><strong>WhatsApp:</strong> {customer_phone}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        <p>📞 Επικοινωνήστε εντός 24 ωρών.</p>
+        <p>🌐 B2B Portal: {WHOLESALE_INFO['b2b_portal']}</p>
+        """
+        
+        send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
         
         session['state'] = 'menu'
         return f"""✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!
@@ -1250,6 +1312,28 @@ def handle_product_choice(msg, customer, session):
     
     if msg == '1':
         # One-off purchase - show store info for pickup
+        customer_phone = customer.get('phone', 'N/A')
+        
+        # Log order
+        logger.info(f"🛒 ORDER: {name} - {price}€ - {customer_phone}")
+        
+        # Send email notification
+        email_subject = f"🛒 Νέα Παραγγελία - {name}"
+        email_html = f"""
+        <h2>🛒 Νέα Παραγγελία</h2>
+        <hr>
+        <p><strong>Προϊόν:</strong> {name}</p>
+        <p><strong>Τιμή:</strong> {price}€</p>
+        <p><strong>Κατάστημα:</strong> {store['name']}</p>
+        <p><strong>Πελάτης:</strong> {customer_phone}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        <p>Ο πελάτης θα έρθει για παραλαβή.</p>
+        """
+        
+        store_email = EMAIL_CONFIG['store_emails'].get(store['id'], EMAIL_CONFIG['store_emails']['chalandri'])
+        send_email([store_email, EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
         session['state'] = 'menu'
         return f"""🛒 ΑΓΟΡΑ: {name}
 
@@ -1745,6 +1829,27 @@ def handle_subscription_confirm(msg, customer, session):
         
         session['state'] = 'menu'
         store = get_customer_store(customer)
+        customer_phone = customer.get('phone', 'N/A')
+        
+        # Send email notification for subscription
+        email_subject = f"🔄 Νέα Συνδρομή - {product.get('name')}"
+        email_html = f"""
+        <h2>🔄 Νέα Συνδρομή</h2>
+        <hr>
+        <p><strong>ID Συνδρομής:</strong> {subscription['id']}</p>
+        <p><strong>Προϊόν:</strong> {product.get('name')}</p>
+        <p><strong>Τιμή:</strong> {subscription['price']:.2f}€ (-10%)</p>
+        <p><strong>Συχνότητα:</strong> {freq_text}</p>
+        <p><strong>Ημέρα Παραλαβής:</strong> {session.get('sub_day')}</p>
+        <p><strong>Επόμενη Παραλαβή:</strong> {subscription['next_pickup']}</p>
+        <hr>
+        <p><strong>Κατάστημα:</strong> {store['name']}</p>
+        <p><strong>Πελάτης:</strong> {customer_phone}</p>
+        <p><strong>Ημερομηνία Εγγραφής:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        """
+        
+        store_email = EMAIL_CONFIG['store_emails'].get(store['id'], EMAIL_CONFIG['store_emails']['chalandri'])
+        send_email([store_email, EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
         
         return f"""🎉 ΕΝΕΡΓΗ!
 
@@ -1833,8 +1938,31 @@ def handle_customer_service(msg, customer, session):
     if msg == '1':
         if claude_client:
             session['ai_mode'] = True
-            return "🤖 AI ενεργοποιήθηκε!"
-        return "AI δεν είναι διαθέσιμο."
+            session['ai_history'] = []
+            customer_phone = customer.get('phone', 'N/A')
+            logger.info(f"🤖 AI SESSION STARTED: {customer_phone}")
+            return "🤖 AI Βοηθός ενεργοποιήθηκε!\n\nΡώτα με οτιδήποτε!\n\n(Γράψε 'menu' για έξοδο)"
+        else:
+            # Log AI request when not available
+            customer_phone = customer.get('phone', 'N/A')
+            store = get_customer_store(customer)
+            logger.warning(f"⚠️ AI REQUESTED BUT NOT AVAILABLE: {customer_phone}")
+            
+            # Send email to support about AI request
+            email_subject = f"🤖 Αίτημα AI Βοήθειας"
+            email_html = f"""
+            <h2>🤖 Αίτημα AI Βοήθειας</h2>
+            <hr>
+            <p><strong>Πελάτης:</strong> {customer_phone}</p>
+            <p><strong>Κατάστημα:</strong> {store['name']}</p>
+            <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+            <hr>
+            <p>⚠️ Ο πελάτης ζήτησε AI βοήθεια αλλά δεν ήταν διαθέσιμο.</p>
+            <p>Παρακαλώ επικοινωνήστε μαζί του.</p>
+            """
+            send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+            
+            return "⚠️ AI δεν είναι διαθέσιμο αυτή τη στιγμή.\n\nΘα επικοινωνήσουμε μαζί σας!\n\nΓράψε 'menu'"
     elif msg == '2':
         session['state'] = 'complaint_form'
         session['complaint_step'] = 'type'
@@ -1899,23 +2027,66 @@ def handle_complaint_form(msg, customer, session):
     return "Γράψε 'menu'"
 
 def handle_product_request(msg, customer, session):
-    """Handle product request"""
+    """Handle product request with email notification"""
     if msg.lower() == 'menu':
         session['state'] = 'menu'
         return get_main_menu(customer)
 
-    logger.info(f"PRODUCT REQUEST: {msg} - {customer['phone']}")
+    customer_phone = customer.get('phone', 'N/A')
+    store = get_customer_store(customer)
+    
+    logger.info(f"🎯 PRODUCT REQUEST: {msg} - {customer_phone}")
+    
+    # Send email notification
+    email_subject = f"🎯 Αίτημα Προϊόντος"
+    email_html = f"""
+    <h2>🎯 Νέο Αίτημα Προϊόντος</h2>
+    <hr>
+    <p><strong>Ζητούμενο Προϊόν:</strong></p>
+    <blockquote style="background:#f5f5f5;padding:10px;border-left:3px solid #3498db;">
+        {msg}
+    </blockquote>
+    <p><strong>Πελάτης:</strong> {customer_phone}</p>
+    <p><strong>Κατάστημα:</strong> {store['name']}</p>
+    <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+    <hr>
+    <p>Ελέγξτε αν το προϊόν είναι διαθέσιμο.</p>
+    """
+    
+    send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+    
     session['state'] = 'menu'
-    return "✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!\n\nΓράψε 'menu'"
+    return "✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!\n\nΘα σας ενημερώσουμε.\n\nΓράψε 'menu'"
 
 def handle_feedback(msg, customer, session):
-    """Handle feedback"""
+    """Handle feedback with email notification"""
     if msg.lower() == 'menu':
         session['state'] = 'menu'
         return get_main_menu(customer)
 
     if msg in ['1', '2', '3', '4', '5']:
-        logger.info(f"FEEDBACK: {msg}⭐ - {customer['phone']}")
+        customer_phone = customer.get('phone', 'N/A')
+        store = get_customer_store(customer)
+        stars = int(msg)
+        star_display = '⭐' * stars
+        
+        logger.info(f"⭐ FEEDBACK: {msg} stars - {customer_phone}")
+        
+        # Send email notification
+        email_subject = f"⭐ Αξιολόγηση Πελάτη - {stars}/5"
+        email_html = f"""
+        <h2>⭐ Νέα Αξιολόγηση</h2>
+        <hr>
+        <p><strong>Βαθμολογία:</strong> {star_display} ({stars}/5)</p>
+        <p><strong>Πελάτης:</strong> {customer_phone}</p>
+        <p><strong>Κατάστημα:</strong> {store['name']}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        {'<p style="color:red;">⚠️ Χαμηλή βαθμολογία - επικοινωνήστε με τον πελάτη!</p>' if stars <= 2 else '<p style="color:green;">✅ Θετική αξιολόγηση!</p>'}
+        """
+        
+        send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
         session['state'] = 'menu'
         return "✅ ΕΥΧΑΡΙΣΤΟΥΜΕ!\n\nΓράψε 'menu'"
     return "Επίλεξε 1-5"
@@ -1977,23 +2148,52 @@ def health():
 def home():
     """Home"""
     store_list = "".join([f"<li>{s['name']}</li>" for s in STORES.values()])
+    ai_status = "✅ Enabled" if claude_client else "❌ Disabled (no API key)"
+    email_status = "✅ Configured" if EMAIL_CONFIG.get('smtp_user') else "❌ Not configured"
+    
     return f"""
     <h1>🏪 CARESTORES Bot v3.4</h1>
     <p>Status: <strong style="color:green;">Running</strong></p>
+    
+    <h2>🔧 Configuration:</h2>
+    <ul>
+        <li>🤖 AI Assistant: {ai_status}</li>
+        <li>📧 Email Notifications: {email_status}</li>
+        <li>🏪 Stores: {len(STORES)} locations</li>
+    </ul>
+    
     <h2>🏪 Καταστήματα:</h2>
     <ul>{store_list}</ul>
+    
     <h2>Features:</h2>
     <ul>
         <li>✅ Multi-Store Selection</li>
-        <li>✅ Franchise Info</li>
-        <li>✅ Wholesale/B2B Portal</li>
-        <li>✅ Subscriptions -10%</li>
-        <li>✅ Baby Formula (NO discount)</li>
-        <li>✅ Pet Products</li>
+        <li>✅ Franchise Lead Capture</li>
+        <li>✅ B2B/Wholesale Portal (-20%)</li>
+        <li>✅ Drive-Through Reservations</li>
+        <li>✅ Subscriptions (-10%)</li>
+        <li>✅ Email Notifications</li>
     </ul>
-    <h2>B2B:</h2>
-    <p>easycaremarket.gr | b2b.easycaremarket.gr</p>
+    
+    <h2>🔗 Links:</h2>
+    <p>
+        <a href="/health">Health Check</a> | 
+        <a href="/api/stores">API: Stores</a> |
+        <a href="/api/status">API: Status</a>
+    </p>
     """
+
+@app.route("/api/status", methods=['GET'])
+def get_status():
+    """Get bot status"""
+    return jsonify({
+        "status": "running",
+        "version": "3.4",
+        "ai_enabled": claude_client is not None,
+        "email_configured": bool(EMAIL_CONFIG.get('smtp_user')),
+        "stores_count": len(STORES),
+        "active_sessions": len(sessions)
+    })
 
 @app.route("/api/stores", methods=['GET'])
 def get_stores():
