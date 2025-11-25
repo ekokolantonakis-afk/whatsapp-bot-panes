@@ -8,9 +8,58 @@ import logging
 import re
 import json
 import hashlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ============================================
+# 📧 EMAIL CONFIGURATION
+# ============================================
+EMAIL_CONFIG = {
+    'smtp_server': getattr(config, 'SMTP_SERVER', 'smtp.gmail.com'),
+    'smtp_port': getattr(config, 'SMTP_PORT', 587),
+    'smtp_user': getattr(config, 'SMTP_USER', ''),
+    'smtp_password': getattr(config, 'SMTP_PASSWORD', ''),
+    'from_email': getattr(config, 'FROM_EMAIL', 'noreply@panes.gr'),
+    'store_emails': {
+        'chalandri': 'halandri@panes.gr',
+        'support': 'support@panes.gr'
+    }
+}
+
+def send_email(to_emails, subject, body_html, body_text=None):
+    """Send email notification"""
+    try:
+        if not EMAIL_CONFIG['smtp_user'] or not EMAIL_CONFIG['smtp_password']:
+            logger.warning("Email not configured - skipping send")
+            return False
+        
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_CONFIG['from_email']
+        msg['To'] = ', '.join(to_emails) if isinstance(to_emails, list) else to_emails
+        
+        if body_text:
+            msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+        msg.attach(MIMEText(body_html, 'html', 'utf-8'))
+        
+        with smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port']) as server:
+            server.starttls()
+            server.login(EMAIL_CONFIG['smtp_user'], EMAIL_CONFIG['smtp_password'])
+            server.send_message(msg)
+        
+        logger.info(f"📧 Email sent to: {to_emails}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Email error: {e}")
+        return False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -462,6 +511,7 @@ def route_message(msg, customer, session):
         'menu': handle_menu,
         'search': handle_search,
         'product_list': handle_product_selection,
+        'product_choice': handle_product_choice,
         'categories': handle_categories,
         'promos': handle_promos_menu,
         'subscription': handle_subscription,
@@ -475,6 +525,7 @@ def route_message(msg, customer, session):
         'product_request': handle_product_request,
         'feedback': handle_feedback,
         'store_selection': handle_store_selection,
+        'franchise': handle_franchise,
         'wholesale': handle_wholesale,
         'wholesale_inquiry': handle_wholesale_inquiry,
         'wholesale_phone': handle_wholesale_phone,
@@ -591,20 +642,98 @@ def get_franchise_menu():
 
 ━━━━━━━━━━━━━━━━━━━━
 
-📺 ΔΕΙΤΕ ΤΟ VIDEO:
-{FRANCHISE_INFO['youtube']}
-
-🌐 ΠΛΗΡΟΦΟΡΙΕΣ:
-{FRANCHISE_INFO['website']}
+📺 VIDEO: {FRANCHISE_INFO['youtube']}
+🌐 INFO: {FRANCHISE_INFO['website']}
 
 ━━━━━━━━━━━━━━━━━━━━
 
-📧 Επικοινωνία:
-{FRANCHISE_INFO.get('email', 'info@carestores.gr')}
+1️⃣ 📝 ΘΕΛΩ ΠΛΗΡΟΦΟΡΙΕΣ
+   (θα σας καλέσουμε)
 
-📞 Ή καλέστε μας!
+📧 {FRANCHISE_INFO.get('email', 'franchise@carestores.gr')}
+📞 6942508739
 
-Γράψε 'menu' για επιστροφή"""
+('menu' για επιστροφή)"""
+
+def handle_franchise(msg, customer, session):
+    """Handle franchise lead capture"""
+    if msg.lower() == 'menu':
+        session['state'] = 'menu'
+        return get_main_menu(customer)
+    
+    step = session.get('franchise_step', 'intro')
+    
+    if step == 'intro':
+        if msg == '1':
+            session['franchise_step'] = 'name'
+            return "📝 ΑΙΤΗΣΗ FRANCHISE\n\nΠαρακαλώ πείτε μας το όνομά σας:"
+        return get_franchise_menu()
+    
+    elif step == 'name':
+        session['franchise_name'] = msg
+        session['franchise_step'] = 'phone'
+        return f"✅ {msg}\n\nΤηλέφωνο επικοινωνίας:"
+    
+    elif step == 'phone':
+        phone_clean = msg.strip().replace(' ', '').replace('-', '')
+        if len(phone_clean) >= 10:
+            session['franchise_phone'] = msg
+            session['franchise_step'] = 'email'
+            return f"✅ {msg}\n\nEmail (ή 'skip' για παράλειψη):"
+        return "❌ Μη έγκυρο τηλέφωνο.\nΠαρακαλώ ξαναπροσπαθήστε:"
+    
+    elif step == 'email':
+        email = msg.strip()
+        if email.lower() == 'skip':
+            email = "Δεν δόθηκε"
+        elif '@' not in email or '.' not in email:
+            return "❌ Μη έγκυρο email.\nΠροσπαθήστε ξανά (ή 'skip'):"
+        
+        # Collect all data
+        name = session.get('franchise_name', 'N/A')
+        phone = session.get('franchise_phone', 'N/A')
+        customer_phone = customer.get('phone', 'N/A')
+        
+        # Log the lead
+        logger.info(f"🏢 FRANCHISE LEAD: {name} - {phone} - {email} - {customer_phone}")
+        
+        # Send email
+        email_subject = f"🏢 Νέο Ενδιαφέρον Franchise - {name}"
+        email_html = f"""
+        <h2>🏢 Νέο Ενδιαφέρον Franchise</h2>
+        <hr>
+        <p><strong>Όνομα:</strong> {name}</p>
+        <p><strong>Τηλέφωνο:</strong> {phone}</p>
+        <p><strong>Email:</strong> {email}</p>
+        <p><strong>WhatsApp:</strong> {customer_phone}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        <p>Παρακαλώ επικοινωνήστε το συντομότερο δυνατό.</p>
+        """
+        
+        send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
+        # Clear session
+        session['franchise_step'] = 'intro'
+        session['state'] = 'menu'
+        
+        return f"""✅ ΑΙΤΗΣΗ ΚΑΤΑΧΩΡΗΘΗΚΕ!
+
+📋 Στοιχεία:
+👤 {name}
+📞 {phone}
+📧 {email}
+
+━━━━━━━━━━━━━━━━━━━━
+
+Η ομάδα μας θα επικοινωνήσει
+μαζί σας εντός 24-48 ωρών!
+
+Ευχαριστούμε για το ενδιαφέρον! 🙏
+
+Γράψε 'menu' για αρχικό"""
+    
+    return get_franchise_menu()
 
 # ============================================
 # 🏭 WHOLESALE / B2B
@@ -826,29 +955,24 @@ def get_main_menu(customer):
     greeting = get_customer_greeting(customer)
     store = get_customer_store(customer)
     
-    promo_banner = "\n🎁 ΠΡΟΣΦΟΡΕΣ: Pampers ΔΩΡΟ + Cashback!\n"
-    
     store_text = f"📍 {store['short_name']}"
     if store.get('drive_through'):
         store_text += " 🚗"
     
     return f"""{greeting}
-{promo_banner}
 🛒 CARESTORES - {store_text}
 
-1️⃣ 🔍 Αναζήτηση Προϊόντος
+1️⃣ 🔍 Αναζήτηση
 2️⃣ 🔥 Δημοφιλή
-3️⃣ 🎁 Προσφορές & Cashback
+3️⃣ 🎁 Προσφορές
 4️⃣ 📦 Κατηγορίες
 5️⃣ 🔄 Συνδρομή -10%
 6️⃣ 👤 Λογαριασμός
-7️⃣ 📍 Τοποθεσία Google Maps
+7️⃣ 📍 Google Maps
 8️⃣ 📞 Εξυπηρέτηση
-
-━━━━━━━━━━━━━━━━━━━━
-9️⃣ 🏪 Αλλαγή Καταστήματος
+9️⃣ 🏪 Αλλαγή Καταστ.
 🔟 🏢 Franchise
-1️⃣1️⃣ 🏭 Χονδρική/B2B
+1️⃣1️⃣ 🏭 B2B/Χονδρική
 
 Απάντησε 1-11"""
 
@@ -899,6 +1023,8 @@ def handle_menu(msg, customer, session):
         return get_store_selection_menu()
 
     elif msg == '10':
+        session['state'] = 'franchise'
+        session['franchise_step'] = 'intro'
         return get_franchise_menu()
 
     elif msg == '11':
@@ -1077,11 +1203,12 @@ def handle_product_selection(msg, customer, session):
         products = session.get('products', [])
         page = session.get('current_page', 1)
         adjusted_index = (page - 1) * 10 + index
-
+        
         if 0 <= adjusted_index < len(products):
             product = products[adjusted_index]
             session['selected_product'] = product
             
+            # If coming from subscription flow, go directly to frequency
             if session.get('after_product') == 'subscription_frequency':
                 if is_discount_excluded(product):
                     session['state'] = 'menu'
@@ -1091,11 +1218,120 @@ def handle_product_selection(msg, customer, session):
                 session['sub_frequency_shown'] = False
                 return handle_subscription_frequency('', customer, session)
             
+            # Normal product view - show options (1 or 2)
+            session['state'] = 'product_choice'
             return format_product_details(product, customer)
         else:
             return "Μη έγκυρη επιλογή!"
     except ValueError:
         return "Στείλε αριθμό!"
+
+def generate_order_id():
+    """Generate unique order ID"""
+    import random
+    timestamp = datetime.now().strftime("%H%M")
+    random_part = random.randint(100, 999)
+    return f"DT-{timestamp}-{random_part}"
+
+def handle_product_choice(msg, customer, session):
+    """Handle product purchase choice (one-off vs subscription vs drive-through)"""
+    if msg.lower() == 'menu':
+        session['state'] = 'menu'
+        return get_main_menu(customer)
+    
+    product = session.get('selected_product')
+    if not product:
+        session['state'] = 'menu'
+        return get_main_menu(customer)
+    
+    store = get_customer_store(customer)
+    name = product.get('name', 'N/A')
+    price = product.get('price', '0')
+    
+    if msg == '1':
+        # One-off purchase - show store info for pickup
+        session['state'] = 'menu'
+        return f"""🛒 ΑΓΟΡΑ: {name}
+
+💰 Τιμή: {price}€
+
+📍 Παραλαβή από:
+{store['name']}
+{store['address']}
+
+📞 {store.get('phone', '210 680 0549')}
+
+🗺️ {store.get('google_maps', '')}
+
+Γράψε 'menu' για αρχικό"""
+    
+    elif msg == '2':
+        # Subscription
+        if is_discount_excluded(product):
+            session['state'] = 'menu'
+            return f"⚠️ Το \"{name}\" δεν συμμετέχει σε εκπτώσεις.\n\nΓράψε 'menu'"
+        
+        session['state'] = 'subscription_frequency'
+        session['sub_frequency_shown'] = False
+        return handle_subscription_frequency('', customer, session)
+    
+    elif msg == '3' and store.get('drive_through'):
+        # Drive-through reservation
+        order_id = generate_order_id()
+        expires = datetime.now() + timedelta(hours=3)
+        expires_str = expires.strftime("%H:%M")
+        
+        # Log the reservation
+        logger.info(f"🚗 DRIVE-THROUGH ORDER: {order_id} - {name} - {price}€ - {customer['phone']}")
+        
+        # Prepare email
+        customer_phone = customer.get('phone', 'N/A')
+        email_subject = f"🚗 Drive-Through Order: {order_id}"
+        email_html = f"""
+        <h2>🚗 Νέα Παραγγελία Drive-Through</h2>
+        <hr>
+        <p><strong>Order ID:</strong> {order_id}</p>
+        <p><strong>Προϊόν:</strong> {name}</p>
+        <p><strong>Τιμή:</strong> {price}€</p>
+        <p><strong>Κατάστημα:</strong> {store['name']}</p>
+        <p><strong>Πελάτης:</strong> {customer_phone}</p>
+        <p><strong>Ώρα:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <p><strong>Λήξη κράτησης:</strong> {expires_str}</p>
+        <hr>
+        <p>⚠️ Η κράτηση ισχύει για 3 ώρες.</p>
+        """
+        
+        # Send emails
+        store_email = EMAIL_CONFIG['store_emails'].get(store['id'], EMAIL_CONFIG['store_emails']['chalandri'])
+        send_email([store_email, EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
+        session['state'] = 'menu'
+        return f"""✅ ΚΡΑΤΗΣΗ ΕΠΙΒΕΒΑΙΩΘΗΚΕ!
+
+🎫 Order ID: {order_id}
+
+📦 {name}
+💰 {price}€
+
+━━━━━━━━━━━━━━━━━━━━
+
+🚗 DRIVE-THROUGH
+📍 {store['name']}
+{store['address']}
+
+⏰ Ισχύει μέχρι: {expires_str}
+(3 ώρες από τώρα)
+
+━━━━━━━━━━━━━━━━━━━━
+
+📞 {store.get('phone', '')}
+🗺️ {store.get('google_maps', '')}
+
+Δείξτε το Order ID στο κατάστημα!
+
+Γράψε 'menu' για αρχικό"""
+    
+    return "Επίλεξε 1, 2 ή 3 (ή 'menu')"
 
 # ============================================
 # PRODUCT FORMATTING
@@ -1216,7 +1452,7 @@ def format_product_list(products, title, page=1, check_promo=False, no_discount_
     return text
 
 def format_product_details(product, customer=None):
-    """Format product details"""
+    """Format product details with purchase options"""
     name = product.get('name', 'N/A')
     price = product.get('price', '0')
     stock = product.get('stock_status', 'outofstock')
@@ -1227,22 +1463,27 @@ def format_product_details(product, customer=None):
     store = get_customer_store(customer) if customer else STORES[DEFAULT_STORE]
     is_b2b = is_b2b_product(product)
     is_business_customer = customer and customer.get('is_business', False)
+    has_drive_through = store.get('drive_through', False)
 
     text = f"📦 {name}\n\n"
-    text += f"💰 Λιανική: {price}€\n"
+    text += f"💰 Τιμή: {price}€\n"
     
     # Show B2B price if product has b2b tag AND customer is business
     if is_b2b and is_business_customer:
         b2b_price = get_b2b_price(product)
         if b2b_price:
-            text += f"\n🏭 ΤΙΜΗ B2B: {b2b_price}€ (-20%)\n"
+            text += f"🏭 B2B: {b2b_price}€ (-20%)\n"
     elif is_b2b:
-        text += f"\n🏭 Διαθέσιμο για B2B\n"
+        text += f"🏭 Διαθέσιμο για B2B\n"
     
-    text += f"\n📊 {'Διαθέσιμο ✅' if stock == 'instock' else 'Εξαντλήθηκε ❌'}\n"
+    text += f"📊 {'Διαθέσιμο ✅' if stock == 'instock' else 'Εξαντλήθηκε ❌'}\n"
 
     if excluded:
         text += "\n⚠️ Σταθερή τιμή - χωρίς εκπτώσεις.\n"
+        text += f"\n📍 {store['short_name']}\n"
+        if has_drive_through:
+            text += f"\n1️⃣ 🚗 Κράτηση Drive-Through (3 ώρες)"
+        text += "\n('menu' για αρχικό)"
     else:
         easypants_ids = EASYPANTS_PROMO_IDS
         if product_id in easypants_ids:
@@ -1251,14 +1492,21 @@ def format_product_details(product, customer=None):
         if 'jumbo' in name_lower and 'premium' in name_lower and 'pampers' in name_lower:
             text += "\n🎁 ΔΩΡΟ Pampers Aqua Harmonie!\n"
         
-        text += f"\n🔄 Συνδρομή: {float(price)*0.9:.2f}€ (-10%)\n"
-
-    text += f"""
+        sub_price = float(price) * 0.9
+        text += f"""
 ━━━━━━━━━━━━━━━━━━━━
-📍 {store['short_name']}
-🅿️ {store.get('parking', 'Parking')}
+ΤΙ ΘΕΛΕΤΕ ΝΑ ΚΑΝΕΤΕ;
 
-('menu' | '5' συνδρομή)"""
+1️⃣ 🛒 Μία αγορά ({price}€)
+2️⃣ 🔄 Συνδρομή ({sub_price:.2f}€ -10%)"""
+        
+        if has_drive_through:
+            text += f"\n3️⃣ 🚗 Drive-Through κράτηση"
+        
+        text += f"""
+
+📍 {store['short_name']}
+('menu' για αρχικό)"""
 
     return text
 
@@ -1603,7 +1851,7 @@ def handle_customer_service(msg, customer, session):
     return "Επίλεξε 1-5"
 
 def handle_complaint_form(msg, customer, session):
-    """Handle complaint"""
+    """Handle complaint with email notification"""
     if msg.lower() == 'menu':
         session['state'] = 'menu'
         return get_main_menu(customer)
@@ -1615,13 +1863,38 @@ def handle_complaint_form(msg, customer, session):
         if msg in types:
             session['complaint_type'] = types[msg]
             session['complaint_step'] = 'description'
-            return "Περιέγραψε:"
+            return "Περιέγραψε το πρόβλημα:"
         return "Επίλεξε 1-3"
 
     elif step == 'description':
-        logger.info(f"COMPLAINT: {session.get('complaint_type')} - {msg} - {customer['phone']}")
+        complaint_type = session.get('complaint_type', 'Γενικό')
+        customer_phone = customer.get('phone', 'N/A')
+        store = get_customer_store(customer)
+        
+        # Log complaint
+        logger.info(f"📢 COMPLAINT: {complaint_type} - {msg} - {customer_phone}")
+        
+        # Send email to support
+        email_subject = f"📢 Παράπονο Πελάτη - {complaint_type}"
+        email_html = f"""
+        <h2>📢 Νέο Παράπονο Πελάτη</h2>
+        <hr>
+        <p><strong>Τύπος:</strong> {complaint_type}</p>
+        <p><strong>Περιγραφή:</strong></p>
+        <blockquote style="background:#f5f5f5;padding:10px;border-left:3px solid #e74c3c;">
+            {msg}
+        </blockquote>
+        <p><strong>Πελάτης:</strong> {customer_phone}</p>
+        <p><strong>Κατάστημα:</strong> {store['name']}</p>
+        <p><strong>Ημερομηνία:</strong> {datetime.now().strftime("%d/%m/%Y %H:%M")}</p>
+        <hr>
+        <p>Παρακαλώ απαντήστε το συντομότερο δυνατό.</p>
+        """
+        
+        send_email([EMAIL_CONFIG['store_emails']['support']], email_subject, email_html)
+        
         session['state'] = 'menu'
-        return "✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!\n\nΓράψε 'menu'"
+        return "✅ ΚΑΤΑΧΩΡΗΘΗΚΕ!\n\nΘα επικοινωνήσουμε σύντομα.\n\nΓράψε 'menu'"
 
     return "Γράψε 'menu'"
 
